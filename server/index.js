@@ -26,7 +26,8 @@ try {
   if (e.code !== 'ENOENT') throw new Error(`Could not load ${statePath}: ${e.message}. Restore the file from a backup or move it aside to start fresh.`);
   state = defaultState();
 }
-// Output connections are never restored automatically after a restart.
+// Start with saved levels visible. Blackout and interrupted fades are not resumed.
+state.blackout = false;
 state.activeScene = null;
 let dirty = true, persistTimer, persistenceError = null, writeQueue = Promise.resolve();
 const output = new Adapters(state, () => { dirty = true; }, () => controller.changed(), () => !!controller.fade, message => enqueueCommand(message));
@@ -125,7 +126,10 @@ const heartbeat = setInterval(() => {
 }, 15000);
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || '0.0.0.0';
-server.listen(port, host, () => console.log(`DMX Control listening on http://${host}:${server.address().port}`));
+server.listen(port, host, () => {
+  console.log(`DMX Control listening on http://${host}:${server.address().port}`);
+  output.start();
+});
 let stopping = false;
 async function shutdown() {
   if (stopping) return;

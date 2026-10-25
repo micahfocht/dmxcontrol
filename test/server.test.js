@@ -85,7 +85,8 @@ test('server synchronizes clients, persists layouts/profiles/scenes across resta
   assert.deepEqual(Object.keys(saved.scenes.at(-1).fixtures), ['wash-1']);
   url = await start(); const c = await client(url); t.after(() => c.ws.terminate());
   assert.equal(c.states[0].master, 43); assert.equal(c.states[0].fixtures[0].x, 17);
-  assert.equal(c.states[0].status.connected, false); assert.equal(c.states[0].library.at(-1).name, 'Custom BGR');
+  while (!c.states.at(-1).adapterStatuses.main.connected) await delay(10);
+  assert.equal(c.states.at(-1).status.connected, true); assert.equal(c.states[0].library.at(-1).name, 'Custom BGR');
   assert.equal(c.states[0].adapters[0].config.mode, 'artnet'); assert.equal(c.states[0].adapters[0].config.artnetUniverse, 32767);
   assert.equal(c.states[0].adapters[1].config.mqttPasswordSet, true);
   assert.equal(JSON.stringify(c.states[0]).includes('server-test-secret'), false);

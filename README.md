@@ -14,7 +14,7 @@ cd dmxcontrol
 
 The script uses sudo to install prerequisites and a private Node.js runtime, installs the app dependencies, and starts the app now and at every boot. Open `http://<controller-ip>:3000` from another device on the same network. No terminal needs to remain open. Git must already be installed; on a fresh Pi, use `sudo apt update && sudo apt install -y git` first.
 
-For a USB DMX dongle, use `./install.sh --with-ola` instead. This also installs and enables OLA; patch your USB output once in OLA's web interface at `http://<controller-ip>:9090` as described below. Network DMX and preview mode do not need OLA. Lighting outputs start disconnected; connect in the app and restore lights when ready.
+For a USB DMX dongle, use `./install.sh --with-ola` instead. This also installs and enables OLA; patch your USB output once in OLA's web interface at `http://<controller-ip>:9090` as described below. Network DMX and preview mode do not need OLA. Configured outputs connect automatically when the controller starts. Preview mode does not connect to hardware.
 
 To update later:
 
@@ -23,7 +23,7 @@ cd dmxcontrol
 ./update.sh
 ```
 
-Updates fetch `origin/main`, fast-forward your checkout, and rerun setup to install dependencies and restart the app. The repo's branch is **main**, not master. Saved settings and the configured HTTP port are kept. Commit or stash tracked local changes first; the updater refuses other branches, local commits outside `origin/main`, and divergent history. Updating interrupts control briefly and lighting outputs need reconnecting afterward.
+Updates fetch `origin/main`, fast-forward your checkout, and rerun setup to install dependencies and restart the app. The repo's branch is **main**, not master. Saved settings and the configured HTTP port are kept. Commit or stash tracked local changes first; the updater refuses other branches, local commits outside `origin/main`, and divergent history. Updating interrupts control briefly; configured outputs reconnect automatically and resume the saved DMX levels with blackout off.
 
 ## Run locally
 
@@ -76,7 +76,9 @@ The output button opens a list of named adapters. **Add adapter** creates anothe
 
 For a node at each light, both fixtures may start at address 1. Use separate unicast IPs (universes may match), or separate universes when multicasting. Two identical destination/universe pairs are rejected to prevent conflicting streams. Each sACN adapter has a stable, distinct source CID. Art-Net, sACN, and USB/OLA adapters can run together; use distinct OLA universes for separate USB outputs.
 
-**Save & connect** and **Disconnect** affect the selected adapter. Connecting a DMX adapter engages stage blackout; connect all desired DMX adapters, then restore lights. Zigbee2MQTT connections leave current house-light levels unchanged. Scenes include house dimmers, while master and blackout affect them only when opted in. Remove an adapter only after reassigning its fixtures. Old single-output settings migrate automatically to “Main output”.
+**Save & connect** and **Disconnect** affect the selected adapter. Manually connecting a DMX adapter engages stage blackout; connect all desired DMX adapters, then restore lights. Zigbee2MQTT connections leave current house-light levels unchanged. Scenes include house dimmers, while master and blackout affect them only when opted in. Remove an adapter only after reassigning its fixtures. Old single-output settings migrate automatically to “Main output”.
+
+At startup, every saved non-preview adapter connects independently. Failed startup connections retry two seconds after each failed attempt, so OLA or the broker can finish starting later. Startup always clears blackout, even if it was saved as on. DMX resumes the saved levels from its first frame, including OLA; MQTT reads device feedback and advertises scene buttons without sending stored brightness. Interrupted scene fades are not resumed. **Disconnect**, saving an adapter’s settings, or removing it cancels any pending startup retries for that adapter. A manual disconnect lasts for the current run; saved adapters connect again at the next controller restart.
 
 ## Network output: sACN
 
@@ -125,7 +127,7 @@ Start the packaged `olad` service, or run `olad` under the user that owns your O
 
 The OLA URL is resolved from the controller, not the iPad. The app sends form-encoded `POST /set_dmx` requests with `u` and 512 comma-separated `d` values, following OLA's [Web API](https://www.openlighting.org/ola/apis/). Only an `ok` response is accepted. Slow transports drop intermediate frames rather than building a stale queue. A successful request means OLA accepted DMX; verify the physical output patch in OLA.
 
-Once connected, an OLA adapter automatically retries failed requests after two seconds until OLA accepts DMX again. Recovery sends the current levels and respects the current blackout state; it does not engage a new stage blackout. The output status shows when retries are active. **Disconnect**, saving output settings, removing the adapter, or stopping the controller cancels retries. Initial connections still require **Save & connect**, including after a controller restart.
+Once connected, an OLA adapter automatically retries failed requests after two seconds until OLA accepts DMX again. Recovery sends the current levels and respects the current blackout state; it does not engage a new stage blackout. The output status shows when retries are active. **Disconnect**, saving output settings, removing the adapter, or stopping the controller cancels retries. Startup connections also retry automatically until OLA is ready.
 
 ## House lights: Zigbee2MQTT / Mosquitto
 
@@ -155,7 +157,7 @@ Connecting an MQTT adapter automatically exposes every saved scene as a [Home As
 
 Pressing a button recalls the scene exactly as tapping its card in this app: saved fades and selected lights are preserved, and blackout stays unchanged. Scenes can include any mix of DMX and house lights; their output adapters must be connected to send physical changes. Scene additions, renames, and deletions update automatically, including changes made while disconnected. Button identities stay stable across renames and restarts.
 
-Buttons become unavailable when their MQTT connection goes offline. Reconnecting or restarting Home Assistant refreshes discovery without recalling a scene. After a controller restart, connect the MQTT adapter again, just as for house-light control. Multiple MQTT adapters using the same broker URL share one set of buttons and each press is handled once.
+Buttons become unavailable when their MQTT connection goes offline. Reconnecting or restarting Home Assistant refreshes discovery without recalling a scene. After a controller restart, the MQTT adapter reconnects automatically and republishes the scene buttons. Multiple MQTT adapters using the same broker URL share one set of buttons and each press is handled once.
 
 For brokers with topic ACLs, the controller also needs read/write access to `homeassistant/button/dmxcontrol_CONTROLLER_ID/+/config`, read access to `homeassistant/status`, read access to `dmxcontrol/CONTROLLER_ID/scene/recall`, and write access to `dmxcontrol/CONTROLLER_ID/+/availability`. `CONTROLLER_ID` is the persisted `cid` in the settings file. Home Assistant needs the inverse command/availability permissions plus discovery access. Discovery and availability messages are retained; button commands are not, and retained presses received on reconnect are ignored.
 
@@ -186,7 +188,7 @@ sudo systemctl disable --now "$service"
 
 OLA is a separate service: `sudo systemctl status olad.service`. Disabling the app does not disable OLA. The installer does not install Mosquitto or Zigbee2MQTT; house-light adapters use your existing broker and bridge.
 
-Outputs always start disconnected after a restart. Connecting a DMX adapter starts stage blackout so restoring levels is an explicit action. A graceful shutdown attempts to send a final DMX blackout; MQTT house lights are left unchanged. Abrupt power loss or hardware failure cannot guarantee that, and some fixtures/dongles hold their last levels.
+Configured outputs connect automatically after a restart with blackout off and the saved DMX levels restored. Manually using **Save & connect** for a DMX adapter still starts stage blackout. A graceful shutdown attempts to send a final DMX blackout; MQTT house lights are left unchanged. Abrupt power loss or hardware failure cannot guarantee that, and some fixtures/dongles hold their last levels.
 
 Environment options:
 
@@ -205,4 +207,4 @@ npm ci
 npm test
 ```
 
-Tests cover profile mapping, RGB/dedicated dimmer scaling, blackout, validation, atomic edits, scene interpolation, real loopback UDP packets and termination, OLA requests/errors/backpressure, ArtDmx headers/addressing/sequence rollover, real Art-Net UDP transmission and final blackout, simultaneous isolated Art-Net and sACN universes, adapter assignments and shared-address routing, legacy migration, multi-client synchronization, cross-origin rejection, and persisted state recovery after a process restart. MQTT tests cover broker authentication, credential masking, brightness commands, state feedback without command loops, rate limiting, availability, reconnects without stale commands, and shared scenes. Deployment tests use isolated directories and mocked apt/systemctl/downloads to check installation, checksum rejection, settings preservation, saved ports, OLA enablement, and failure reporting; generated services are checked with systemd's parser when available. Updater tests use real local Git repositories to check fast-forward updates and rejection of local changes or commits. Browser checks cover touch controls, arrangement, custom profiles, patch validation, scene saving, output failures, and responsive tablet/phone layouts. A real Pi installation, reboot, and physical fixture or dongle still need testing.
+Tests cover profile mapping, RGB/dedicated dimmer scaling, blackout, validation, atomic edits, scene interpolation, real loopback UDP packets and termination, OLA requests/errors/backpressure, ArtDmx headers/addressing/sequence rollover, real Art-Net UDP transmission and final blackout, simultaneous isolated Art-Net and sACN universes, adapter assignments and shared-address routing, legacy migration, multi-client synchronization, cross-origin rejection, and persisted state recovery after a process restart. MQTT tests cover broker authentication, credential masking, brightness commands, state feedback without command loops, rate limiting, availability, reconnects without stale commands, and shared scenes. Startup tests run a real controller process with OLA and MQTT together, including delayed services, automatic Home Assistant button discovery, clearing saved blackout before the first DMX frame, and cancellation of startup retries. Deployment tests use isolated directories and mocked apt/systemctl/downloads to check installation, checksum rejection, settings preservation, saved ports, OLA enablement, and failure reporting; generated services are checked with systemd's parser when available. Updater tests use real local Git repositories to check fast-forward updates and rejection of local changes or commits. Browser checks cover touch controls, arrangement, custom profiles, patch validation, scene saving, output failures, and responsive tablet/phone layouts. A real Pi installation, reboot, and physical fixture or dongle still need testing.

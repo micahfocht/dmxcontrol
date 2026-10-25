@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
+import http from 'node:http';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
@@ -10,7 +11,7 @@ import { spawn } from 'node:child_process';
 import { Aedes } from 'aedes';
 import { connectAsync } from 'mqtt';
 import { WebSocket } from 'ws';
-import { defaultState } from '../server/fixtures.js';
+import { defaultState, renderDmx } from '../server/fixtures.js';
 import { Adapters } from '../server/adapters.js';
 import { Controller } from '../server/controller.js';
 
@@ -18,8 +19,8 @@ async function until(condition, message = 'condition') {
   const deadline = Date.now() + 5000;
   while (!condition()) { if (Date.now() > deadline) throw new Error(`Timed out: ${message}`); await delay(10); }
 }
-async function broker(t) {
-  const aedes = await Aedes.createBroker(), server = net.createServer(aedes.handle), sockets = new Set();
+async function broker(t, options = {}) {
+  const aedes = await Aedes.createBroker(options), server = net.createServer(aedes.handle), sockets = new Set();
   server.on('connection', socket => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)); });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(async () => { sockets.forEach(socket => socket.destroy()); await aedes.close(); await new Promise(resolve => server.close(resolve)); });
@@ -168,10 +169,26 @@ test('multiple MQTT adapters on one broker expose one set of buttons and handle 
   await until(() => recalls.length === 2); await delay(100); assert.equal(recalls.length, 2);
 });
 
-test('server routes an MQTT button press to browser state and persisted scene levels', { timeout: 15000 }, async t => {
-  const b = await broker(t), ha = await observer(t, b.url), state = stateFor(b.url);
+for (const savedBlackout of [false, true]) test(`server starts with blackout off when saved blackout=${savedBlackout}, auto-connects DMX and MQTT, and accepts HA presses`, { timeout: 20000 }, async t => {
+  let mqttReady = true, olaReady = !savedBlackout;
+  const b = await broker(t, { authenticate(client, username, password, callback) { callback(null, mqttReady); } });
+  const ha = await observer(t, b.url), state = stateFor(b.url), olaRequests = [], dimmerCommands = [];
+  // On one run, both services initially fail to exercise boot-time retries.
+  mqttReady = !savedBlackout;
+  b.aedes.on('publish', (packet, client) => { if (client && packet.topic === 'zigbee2mqtt/house/lobby/set') dimmerCommands.push(JSON.parse(packet.payload)); });
+  const ola = http.createServer(async (req, res) => {
+    let body = ''; for await (const part of req) body += part;
+    olaRequests.push(Buffer.from(new URLSearchParams(body).get('d').split(',').map(Number)));
+    res.writeHead(olaReady ? 200 : 503); res.end(olaReady ? 'ok' : 'Starting OLA');
+  });
+  ola.listen(0, '127.0.0.1'); await once(ola, 'listening');
+  t.after(() => { ola.closeAllConnections(); ola.close(); });
+  Object.assign(state.adapters[0].config, { mode: 'usb', olaUrl: `http://127.0.0.1:${ola.address().port}` });
+  state.blackout = savedBlackout;
+  state.fixtures.push({ ...structuredClone(state.fixtures[0]), id: 'lobby', adapterId: 'house', mqttDevice: 'house/lobby', mqttMaxBrightness: 254, followDesk: false });
   state.scenes[0].fade = 0;
   const scene = state.scenes[0];
+  scene.fixtures.lobby = { ...state.fixtures.at(-1).levels, intensity: 33 };
   const dir = await mkdtemp(path.join(tmpdir(), 'dmx-ha-test-'));
   await writeFile(path.join(dir, 'state.json'), JSON.stringify(state));
   const child = spawn(process.execPath, ['server/index.js'], { env: { ...process.env, DMX_DATA_DIR: dir, HOST: '127.0.0.1', PORT: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -185,16 +202,34 @@ test('server routes an MQTT button press to browser state and persisted scene le
   t.after(() => ws.terminate());
   ws.on('message', payload => { const message = JSON.parse(payload); if (message.type === 'state') states.push(message); });
   await once(ws, 'open');
-  ws.send(JSON.stringify({ type: 'connect', adapterId: 'house' }));
+  if (savedBlackout) {
+    await until(() => states.at(-1)?.adapterStatuses.main.error?.includes('Retrying startup') && states.at(-1)?.adapterStatuses.house.error?.includes('Retrying startup'), 'startup failures reported');
+    assert.equal((await (await fetch(`${url}/api/health`)).json()).ok, true);
+    mqttReady = true;
+  }
   await until(() => ha.configs().size === state.scenes.length);
+  if (savedBlackout) {
+    assert.equal(states.at(-1).adapterStatuses.main.connected, false, 'MQTT connected independently while OLA was unavailable');
+    olaReady = true;
+  }
+  await until(() => states.at(-1)?.adapterStatuses.main.connected && states.at(-1)?.adapterStatuses.house.connected, 'both saved adapters connect automatically');
+  assert.ok(states.every(s => s.blackout === false), 'blackout is cleared before broadcasting startup state');
+  assert.equal(states.at(-1).activeScene, null);
+  assert.deepEqual(olaRequests[0], renderDmx({ ...state, blackout: false }));
+  assert.ok(olaRequests[0].some(value => value > 0), 'saved DMX levels are visible from the first startup frame');
+  assert.equal(dimmerCommands.length, 0, 'startup does not replay saved house brightness');
   const config = [...ha.configs().values()].find(c => c.payload_press === scene.id);
   await ha.client.publishAsync(config.command_topic, config.payload_press);
   await until(() => states.at(-1)?.activeScene === scene.id, 'scene reflected in browser');
   assert.equal(states.at(-1).master, scene.master);
   assert.deepEqual(states.at(-1).fixtures[0].levels, scene.fixtures['wash-1']);
+  assert.equal(states.at(-1).blackout, false);
+  await until(() => dimmerCommands.length === 1 && olaRequests.at(-1).equals(renderDmx(states.at(-1))), 'HA scene reaches both physical output transports');
+  assert.deepEqual(dimmerCommands[0], { state: 'ON', brightness: 84 });
   const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited;
   assert.equal(child.exitCode, 0, stderr);
   const saved = JSON.parse(await readFile(path.join(dir, 'state.json'), 'utf8'));
   assert.equal(saved.activeScene, scene.id); assert.deepEqual(saved.fixtures[0].levels, scene.fixtures['wash-1']);
+  assert.equal(saved.blackout, false);
   await until(() => ha.latest(config.availability_topic) === 'offline');
 });

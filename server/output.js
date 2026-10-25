@@ -51,7 +51,7 @@ export class Output {
     // OLA's /set_dmx endpoint responds with plain "ok" on success.
     if (!res.ok || body.trim() !== 'ok') throw new Error(`OLA rejected DMX: ${body.slice(0, 180) || res.status}`);
   }
-  async connect(config) {
+  async connect(config, initialSlots = Buffer.alloc(512)) {
     await this.disconnect();
     this.config = { ...config };
     this.report({ connecting: true, error: null, frames: 0 });
@@ -70,7 +70,7 @@ export class Output {
           if (config.interface) this.socket.setMulticastInterface(config.interface);
         }
       } else if (config.mode === 'usb') {
-        await this.olaSend(Buffer.alloc(512));
+        await this.olaSend(initialSlots);
       } else {
         throw new Error('Preview mode does not send DMX. Choose an output first.');
       }

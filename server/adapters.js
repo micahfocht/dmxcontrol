@@ -30,6 +30,7 @@ export class Adapters {
     this.onStatus = onStatus;
     this.onChange = onChange; this.isFading = isFading; this.onCommand = onCommand;
     this.outputs = new Map();
+    this.startupConnections = new Map();
     for (const a of state.adapters) this.add(a);
   }
   add(adapter) {
@@ -53,19 +54,55 @@ export class Adapters {
     return { connected: values.some(s => s.connected), connectedCount: values.filter(s => s.connected).length,
       connecting: values.some(s => s.connecting), error: errors.join(' · ') || null, frames: values.reduce((sum, s) => sum + s.frames, 0) };
   }
+  start() {
+    for (const adapter of this.state.adapters) {
+      if (adapter.config.mode !== 'preview') this.startupConnections.set(adapter.id, { pending: null, retryAt: 0 });
+    }
+    this.connectStartupAdapters();
+  }
+  connectStartupAdapters() {
+    for (const [id, attempt] of this.startupConnections) {
+      if (attempt.pending || Date.now() < attempt.retryAt) continue;
+      const adapter = this.state.adapters.find(a => a.id === id), output = this.get(id);
+      // Start each adapter independently with current levels and blackout,
+      // including the first OLA frame, without replaying Zigbee levels.
+      attempt.pending = output.connect(adapter.config, adapter.config.mode === 'usb' ? renderDmx(this.state, id) : undefined)
+        .then(() => { if (this.startupConnections.get(id) === attempt) this.startupConnections.delete(id); })
+        .catch(e => {
+          if (this.startupConnections.get(id) !== attempt) return;
+          attempt.retryAt = Date.now() + 2000;
+          output.report({ connected: false, connecting: true, error: `${e.message} Retrying startup connection automatically in 2 seconds.` });
+        })
+        .finally(() => { attempt.pending = null; });
+    }
+  }
+  async cancelStartup(id) {
+    const attempt = this.startupConnections.get(id);
+    this.startupConnections.delete(id);
+    // Finish the in-flight connect before changing or closing this output, so a
+    // late success cannot reconnect an adapter after the user disconnects it.
+    await attempt?.pending;
+  }
   async connect(id) {
+    await this.cancelStartup(id);
     const adapter = this.state.adapters.find(a => a.id === id);
     if (!adapter) throw new Error('Output adapter not found.');
     await this.get(id).connect(adapter.config);
   }
-  async disconnect(id) { await this.get(id).disconnect(); }
+  async disconnect(id) { await this.cancelStartup(id); await this.get(id).disconnect(); }
   async remove(id) { await this.disconnect(id); this.outputs.delete(id); }
   touch(ids) {
     const selected = new Set(ids);
     for (const f of this.state.fixtures) if (selected.has(f.id)) this.get(f.adapterId).request?.(f);
   }
-  send() { for (const a of this.state.adapters) this.get(a.id).send(a.config.mode === 'mqtt' ? undefined : renderDmx(this.state, a.id)); }
+  send() {
+    this.connectStartupAdapters();
+    for (const a of this.state.adapters) this.get(a.id).send(a.config.mode === 'mqtt' ? undefined : renderDmx(this.state, a.id));
+  }
   async disconnectAll() {
+    const starting = [...this.startupConnections.values()];
+    this.startupConnections.clear();
+    await Promise.allSettled(starting.map(attempt => attempt.pending));
     const results = await Promise.allSettled([...this.outputs.values()].map(output => output.disconnect()));
     const errors = results.filter(r => r.status === 'rejected').map(r => r.reason.message);
     if (errors.length) throw new Error(errors.join(' · '));

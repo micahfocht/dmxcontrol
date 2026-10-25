@@ -306,7 +306,7 @@ function updateOutputFields() {
   $('#network-destination').placeholder = mode === 'artnet' ? 'e.g. 192.168.1.20' : 'Leave blank for multicast';
   $('#network-note').textContent = mode === 'artnet' ? 'Enter the node’s unicast IP. Art-Net port-addresses start at 0. Match the address on your node; some node menus number universes from 1.' : 'Unicast: enter your DMX node’s IP. Multicast: leave it blank. Match the universe on the receiver.';
   updateArtnetAddress();
-  $('#connect-note').textContent = mode === 'mqtt' ? 'Connecting reads device state. Lights change when you adjust a dimmer or recall a scene; disconnecting leaves them at their last level.' : 'Connecting a DMX adapter starts stage blackout. Connect your adapters, then tap “Restore lights” when ready.';
+  $('#connect-note').textContent = mode === 'mqtt' ? 'Connects automatically on startup and reads device state. Lights change when you adjust a dimmer or recall a scene; disconnecting leaves them at their last level.' : 'Startup connects automatically with your saved levels and blackout off. Using “Save & connect” starts stage blackout; tap “Restore lights” when ready.';
   $('#connect-output').hidden = mode === 'preview';
 }
 function updateArtnetAddress() {
@@ -318,7 +318,7 @@ function updateOutputStatus() {
   if (!state) return;
   const adapter = state.adapters.find(a => a.id === outputId), status = state.adapterStatuses[outputId];
   if (!adapter || !status) return;
-  $('#output-state').textContent = status.error || (status.connected ? adapter.config.mode === 'mqtt' ? `MQTT connected · ${status.frames} commands sent · ${status.devices?.length ?? 0} dimmers discovered` : `${status.frames} frames sent · ${adapter.config.mode === 'usb' ? 'OLA accepted DMX; check USB patch in OLA' : 'UDP sent; receiver response is not available'}` : 'This adapter is disconnected.');
+  $('#output-state').textContent = status.error || (status.connected ? adapter.config.mode === 'mqtt' ? `MQTT connected · ${status.frames} commands sent · ${status.devices?.length ?? 0} dimmers discovered` : `${status.frames} frames sent · ${adapter.config.mode === 'usb' ? 'OLA accepted DMX; check USB patch in OLA' : 'UDP sent; receiver response is not available'}` : status.connecting ? 'Connecting to this adapter…' : 'This adapter is disconnected.');
   $('#disconnect-output').hidden = !status.connected && !status.connecting;
   const assigned = state.fixtures.filter(f => f.adapterId === outputId).length;
   $('#adapter-assignment').textContent = `${assigned} fixture${assigned !== 1 ? 's' : ''} assigned${assigned ? ' · reassign in Fixture patch before removing' : ''}`;

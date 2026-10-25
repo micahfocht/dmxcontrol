@@ -70,6 +70,50 @@ test('OLA errors are visible and do not claim that physical output is connected'
   assert.match(output.status.error, /OLA/);
 });
 
+for (const action of ['disconnect', 'output', 'removeAdapter', 'shutdown']) {
+  test(`${action} cancels failed startup connections without retrying later`, { timeout: 5000 }, async t => {
+    let ready = false, now = 0;
+    t.mock.method(Date, 'now', () => now);
+    const ola = await olaServer(t, (req, res) => { res.writeHead(ready ? 200 : 503); res.end(ready ? 'ok' : 'Starting'); });
+    const state = defaultState(); state.fixtures = [];
+    state.adapters.push({ id: 'spare', name: 'Spare', config: { ...state.adapters[0].config } });
+    Object.assign(state.adapters[0].config, { mode: 'usb', olaUrl: ola.url });
+    const outputs = new Adapters(state), controller = new Controller(state, outputs);
+    outputs.start(); await outputs.startupConnections.get('main').pending;
+    assert.equal(ola.requests.length, 1); assert.equal(outputs.get('main').status.connecting, true);
+    assert.equal(outputs.startupConnections.has('spare'), false, 'preview adapters are skipped');
+    if (action === 'shutdown') await outputs.disconnectAll();
+    else await controller.command({ type: action, adapterId: 'main', name: 'New settings', config: { ...state.adapters[0].config, olaUniverse: 9 } });
+    ready = true; now += 10000;
+    for (let i = 0; i < 10; i++) outputs.send();
+    assert.equal(outputs.startupConnections.size, 0); assert.equal(ola.requests.length, 1);
+    await outputs.disconnectAll();
+  });
+}
+
+test('disconnect waits for an in-flight startup connection and does not allow it to reconnect afterward', { timeout: 5000 }, async t => {
+  let heldResponse, releaseRequest, now = 0;
+  t.mock.method(Date, 'now', () => now);
+  const requestHeld = new Promise(resolve => { releaseRequest = resolve; });
+  const ola = await olaServer(t, (req, res) => {
+    if (!heldResponse) { heldResponse = res; releaseRequest(); }
+    else res.end('ok');
+  });
+  const state = defaultState();
+  Object.assign(state.adapters[0].config, { mode: 'usb', olaUrl: ola.url });
+  const outputs = new Adapters(state), controller = new Controller(state, outputs);
+  outputs.start(); await requestHeld;
+  for (let i = 0; i < 10; i++) outputs.send();
+  assert.equal(ola.requests.length, 1, 'no overlapping startup attempts');
+  const disconnect = controller.command({ type: 'disconnect', adapterId: 'main' });
+  heldResponse.end('ok'); await disconnect;
+  assert.equal(outputs.status.connected, false); assert.equal(outputs.status.connecting, false);
+  assert.equal(outputs.startupConnections.size, 0);
+  assert.ok(ola.requests.at(-1).slots.every(v => v === 0), 'late success is followed by a final blackout');
+  now += 10000; outputs.send(); assert.equal(ola.requests.length, 2);
+  await outputs.disconnectAll();
+});
+
 test('OLA retries dropped and rejected requests at two-second intervals with current levels and blackout', { timeout: 5000 }, async t => {
   let response = 'ok', now = 0;
   t.mock.method(Date, 'now', () => now);
