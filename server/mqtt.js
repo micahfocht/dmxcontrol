@@ -1,4 +1,5 @@
 import { connect } from 'mqtt';
+import { HomeAssistantScenes } from './home-assistant.js';
 
 export function mqttTopic(value, label) {
   const topic = typeof value === 'string' ? value.trim() : '';
@@ -15,11 +16,12 @@ export function dimmerCommand(fixture, state) {
 
 // Unlike DMX, Zigbee sends changes rather than a continuous frame stream.
 export class MqttOutput {
-  constructor(state, adapterId, cid, onStatus = () => {}, onChange = () => {}, isFading = () => false) {
+  constructor(state, adapterId, cid, onStatus = () => {}, onChange = () => {}, isFading = () => false, onCommand = () => {}, isSceneHost = () => true) {
     Object.assign(this, { state, adapterId, cid, onStatus, onChange, isFading });
     this.status = { connected: false, connecting: false, error: null, frames: 0, bridgeOnline: null, devices: [], reported: Object.create(null) };
     this.baselines = new Map(); this.lastSent = new Map(); this.topicSignature = ''; this.subscriptions = new Set();
     this.nextPublish = 0; this.pending = null; this.client = null; this.subscriptionPending = null; this.cursor = 0;
+    this.scenes = new HomeAssistantScenes(this, onCommand, isSceneHost);
   }
   fixtures() { return this.state.fixtures.filter(f => f.adapterId === this.adapterId); }
   report(patch) { Object.assign(this.status, patch); this.onStatus(); }
@@ -34,7 +36,7 @@ export class MqttOutput {
   async updateSubscriptions() {
     if (!this.client?.connected) return;
     const base = this.config.mqttBaseTopic;
-    const desired = new Set([`${base}/bridge/state`, `${base}/bridge/devices`, ...this.fixtures().flatMap(f => [`${base}/${f.mqttDevice}`, `${base}/${f.mqttDevice}/availability`])]);
+    const desired = new Set([...this.scenes.subscriptions, `${base}/bridge/state`, `${base}/bridge/devices`, ...this.fixtures().flatMap(f => [`${base}/${f.mqttDevice}`, `${base}/${f.mqttDevice}/availability`])]);
     const signature = [...desired].sort().join('\n');
     if (signature === this.topicSignature) return;
     const removed = [...this.subscriptions].filter(topic => !desired.has(topic));
@@ -50,12 +52,13 @@ export class MqttOutput {
   async connect(config) {
     await this.disconnect();
     this.config = { ...config }; this.topicSignature = ''; this.subscriptions.clear();
+    this.scenes.published.clear(); this.scenes.refresh = true; this.scenes.retryAt = 0;
     this.status.reported = Object.create(null); this.status.devices = []; this.status.bridgeOnline = null;
     this.resetBaselines(); this.report({ connecting: true, error: null, frames: 0 });
     const client = connect(config.mqttUrl, { clientId: `dmx-${this.cid}`, username: config.mqttUsername || undefined, password: config.mqttPassword || undefined,
-      clean: true, queueQoSZero: false, reconnectPeriod: 2000, connectTimeout: 5000, keepalive: 30 });
+      clean: true, queueQoSZero: false, reconnectPeriod: 2000, connectTimeout: 5000, keepalive: 30, will: this.scenes.will });
     this.client = client;
-    client.on('message', (topic, payload) => { if (this.client === client) this.message(topic, payload); });
+    client.on('message', (topic, payload, packet) => { if (this.client === client) this.message(topic, payload, packet); });
     client.on('close', () => { if (this.client === client) { this.resetBaselines(); this.report({ connected: false, connecting: false }); } });
     client.on('reconnect', () => { if (this.client === client) this.report({ connecting: true }); });
     client.on('error', e => { if (this.client === client) this.report({ error: `MQTT: ${e.message}` }); });
@@ -65,10 +68,13 @@ export class MqttOutput {
       client.once('error', initialError);
       client.on('connect', async () => {
         this.resetBaselines(); this.topicSignature = ''; this.subscriptions.clear();
+        this.scenes.refresh = true;
         try {
           await this.subscribeFixtures();
           if (this.client !== client) return;
+          await client.publishAsync(this.scenes.availabilityTopic, 'online', { qos: 0, retain: true });
           this.report({ connected: true, connecting: false, error: this.status.bridgeOnline === false ? 'Zigbee2MQTT is offline.' : null });
+          await this.scenes.sync();
           clearTimeout(timeout); client.removeListener('error', initialError); resolve();
         } catch (e) { this.report({ connected: false, connecting: false, error: e.message }); clearTimeout(timeout); reject(e); }
       });
@@ -76,8 +82,9 @@ export class MqttOutput {
       await this.disconnect(); this.report({ error: `Cannot connect to MQTT: ${e.message}` }); throw new Error(this.status.error);
     });
   }
-  message(topic, payload) {
+  message(topic, payload, packet) {
     if (payload.length > 1024 * 1024) return;
+    if (this.scenes.message(topic, payload, packet)) return;
     let data; try { data = JSON.parse(payload.toString()); } catch { data = payload.toString(); }
     const base = this.config.mqttBaseTopic;
     if (topic === `${base}/bridge/state`) {
@@ -129,6 +136,7 @@ export class MqttOutput {
     }
   }
   send() {
+    this.scenes.sync();
     const fixtures = this.fixtures(), ids = new Set(fixtures.map(f => f.id));
     for (const id of this.baselines.keys()) if (!ids.has(id)) { this.baselines.delete(id); delete this.status.reported[id]; this.lastSent.delete(id); }
     for (const f of fixtures) if (this.baselines.get(f.id)?.device !== f.mqttDevice) this.remember(f);
@@ -153,8 +161,12 @@ export class MqttOutput {
     const client = this.client; this.client = null;
     // Disconnecting this controller leaves house lights at their last level.
     this.report({ connected: false, connecting: false });
-    await this.pending;
-    if (client) await client.endAsync(true);
+    await Promise.allSettled([this.pending, this.scenes.pending]);
+    if (client) {
+      try {
+        if (client.connected) await client.publishAsync(this.scenes.availabilityTopic, 'offline', { qos: 0, retain: true });
+      } finally { await client.endAsync(true); }
+    }
     this.report({ connected: false, connecting: false, error: null });
   }
 }

@@ -25,16 +25,22 @@ function adapterCid(cid, id) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 export class Adapters {
-  constructor(state, onStatus = () => {}, onChange = () => {}, isFading = () => false) {
+  constructor(state, onStatus = () => {}, onChange = () => {}, isFading = () => false, onCommand = () => {}) {
     this.state = state;
     this.onStatus = onStatus;
-    this.onChange = onChange; this.isFading = isFading;
+    this.onChange = onChange; this.isFading = isFading; this.onCommand = onCommand;
     this.outputs = new Map();
     for (const a of state.adapters) this.add(a);
   }
   add(adapter) {
     const cid = adapterCid(this.state.cid, adapter.id);
-    this.outputs.set(adapter.id, adapter.config.mode === 'mqtt' ? new MqttOutput(this.state, adapter.id, cid, this.onStatus, this.onChange, this.isFading) : new Output(cid, this.onStatus));
+    this.outputs.set(adapter.id, adapter.config.mode === 'mqtt' ? new MqttOutput(this.state, adapter.id, cid, this.onStatus, this.onChange, this.isFading, this.onCommand, () => this.isSceneHost(adapter.id)) : new Output(cid, this.onStatus));
+  }
+  isSceneHost(id) {
+    // Several Zigbee bridges may share a broker. Advertise one set of buttons
+    // and execute each press once, using the first connected adapter there.
+    const broker = this.get(id).config?.mqttUrl;
+    return [...this.outputs].find(([, output]) => output instanceof MqttOutput && output.client?.connected && output.config?.mqttUrl === broker)?.[0] === id;
   }
   configure(adapter) {
     if ((this.get(adapter.id) instanceof MqttOutput) !== (adapter.config.mode === 'mqtt')) this.add(adapter);

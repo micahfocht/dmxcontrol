@@ -4,7 +4,7 @@ import net from 'node:net';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Aedes } from 'aedes';
-import { defaultState, validatePatch } from '../server/fixtures.js';
+import { defaultState, renderDmx, validatePatch } from '../server/fixtures.js';
 import { validateOutput } from '../server/output.js';
 import { Adapters, validateAdapters } from '../server/adapters.js';
 import { Controller } from '../server/controller.js';
@@ -153,6 +153,30 @@ test('MQTT scene levels work alongside DMX while connect does not engage stage b
   await c.command({ type: 'levels', ids: [fixture.id], levels: { intensity: 75 } });
   await c.command({ type: 'recallScene', id: scene.id }); assert.equal(fixture.levels.intensity, 33);
   assert.equal(state.fixtures[0].levels.intensity, 75);
+});
+
+test('selected-light scenes send only included MQTT commands and keep excluded DMX and house levels', { timeout: 8000 }, async t => {
+  const b = await broker(t), { state, fixture } = setup(); state.adapters[1].config.mqttUrl = b.url;
+  const excluded = { ...structuredClone(fixture), id: 'house-2', mqttDevice: 'house/right', followDesk: true };
+  state.fixtures.push(excluded);
+  const commands = []; b.aedes.on('publish', (packet, client) => { if (client && packet.topic.endsWith('/set')) commands.push(packet); });
+  const outputs = new Adapters(state), c = new Controller(state, outputs); t.after(() => outputs.disconnectAll());
+  fixture.levels.intensity = 33;
+  await c.command({ type: 'saveScene', name: 'House left only', fade: 0, fixtureIds: [fixture.id] });
+  const houseScene = state.scenes.at(-1);
+  await c.command({ type: 'saveScene', name: 'Stage left only', fade: 0, fixtureIds: ['wash-1'] });
+  const stageScene = state.scenes.at(-1);
+  fixture.levels.intensity = 75; state.master = 41;
+  await c.command({ type: 'connect', adapterId: 'house' });
+  const beforeDmx = renderDmx(state), beforeExcluded = structuredClone(excluded);
+  await c.command({ type: 'recallScene', id: houseScene.id }); outputs.send(); await outputs.get('house').pending;
+  await until(() => commands.length === 1);
+  assert.equal(commands[0].topic, 'zigbee2mqtt/house/left/set');
+  assert.deepEqual(JSON.parse(commands[0].payload), { state: 'ON', brightness: 84 });
+  assert.deepEqual(renderDmx(state), beforeDmx); assert.deepEqual(excluded, beforeExcluded);
+  await c.command({ type: 'recallScene', id: stageScene.id });
+  outputs.send(); await delay(250); outputs.send(); await outputs.get('house').pending;
+  assert.equal(commands.length, 1); assert.equal(state.master, 41); assert.deepEqual(excluded, beforeExcluded);
 });
 
 test('an explicit blackout applies to opted-in house lights even when the desk was already blacked out at connect', { timeout: 8000 }, async t => {

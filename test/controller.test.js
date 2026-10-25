@@ -85,10 +85,83 @@ test('custom profiles and saved scenes survive patch removal, new fixtures are n
   assert.equal(c.view().library.at(-1).name, 'My fixture');
   await c.command({ type: 'saveScene', name: 'My look', fade: 0 });
   const scene = state.scenes.at(-1);
+  assert.equal(scene.master, state.master);
+  assert.deepEqual(Object.keys(scene.fixtures), state.fixtures.map(f => f.id));
   const patch = structuredClone(state.fixtures); patch[0].id = 'new-light'; patch[0].levels.intensity = 17;
   await c.command({ type: 'patch', fixtures: patch });
   await c.command({ type: 'recallScene', id: scene.id });
   assert.equal(state.fixtures[0].levels.intensity, 17);
+});
+
+for (const fade of [0, 1]) {
+  test(`a selected-light scene with a ${fade}s fade leaves excluded lights, master, and blackout unchanged`, async () => {
+    const state = defaultState(), touched = [], c = new Controller(state, { touch: ids => touched.push(ids) });
+    const [included, excluded] = state.fixtures;
+    included.levels.intensity = 90;
+    await c.command({ type: 'saveScene', name: 'Left only', fade, fixtureIds: [included.id] });
+    const scene = state.scenes.at(-1);
+    assert.equal(scene.master, null); assert.deepEqual(Object.keys(scene.fixtures), [included.id]);
+    included.levels.intensity = 10; excluded.levels.intensity = 22; state.master = 37;
+    const before = structuredClone(excluded), excludedDmx = renderDmx(state).subarray(3, 6);
+    await c.command({ type: 'recallScene', id: scene.id });
+    if (fade) {
+      const start = c.fade.start; c.tick(start + 500);
+      assert.ok(Math.abs(included.levels.intensity - 50) < 1e-8);
+      assert.equal(state.master, 37); assert.deepEqual(excluded, before);
+      assert.deepEqual(renderDmx(state).subarray(3, 6), excludedDmx);
+      c.tick(start + 1001);
+    }
+    assert.equal(included.levels.intensity, 90);
+    assert.equal(state.master, 37); assert.deepEqual(excluded, before);
+    assert.deepEqual(renderDmx(state).subarray(3, 6), excludedDmx);
+    assert.deepEqual(touched, [[included.id]]); assert.equal(c.fade, null);
+    state.blackout = true;
+    await c.command({ type: 'recallScene', id: scene.id });
+    if (fade) c.tick(c.fade.start + 1001);
+    assert.equal(state.blackout, true); assert.ok(renderDmx(state).every(v => v === 0));
+  });
+}
+
+test('editing a scene preserves retained snapshots and captures only newly included lights', async () => {
+  const state = defaultState(), c = new Controller(state, {}), original = structuredClone(state.scenes[0]);
+  state.fixtures[0].levels.intensity = 12; state.fixtures[1].levels.intensity = 23; state.master = 31;
+  const live = structuredClone(state.fixtures);
+  await c.command({ type: 'updateScene', id: original.id, name: 'Left wash', fade: 0, fixtureIds: ['wash-1'] });
+  let scene = state.scenes[0];
+  assert.equal(scene.id, original.id); assert.equal(scene.master, null);
+  assert.deepEqual(scene.fixtures, { 'wash-1': original.fixtures['wash-1'] });
+  assert.deepEqual(state.fixtures, live); assert.equal(state.master, 31);
+  await c.command({ type: 'updateScene', id: scene.id, name: 'Both washes', fade: 1, fixtureIds: ['wash-1', 'wash-2'] });
+  scene = state.scenes[0];
+  assert.equal(scene.master, null); // Explicit selections never capture the shared master, even if every light is checked.
+  assert.deepEqual(scene.fixtures['wash-1'], original.fixtures['wash-1']);
+  assert.deepEqual(scene.fixtures['wash-2'], live[1].levels);
+  await c.command({ type: 'recallScene', id: scene.id });
+  assert.ok(c.fade);
+  await c.command({ type: 'updateScene', id: scene.id, name: 'Right wash', fade: 0, fixtureIds: ['wash-2'] });
+  assert.equal(c.fade, null); assert.equal(state.activeScene, null);
+  await c.command({ type: 'recallScene', id: scene.id });
+  assert.equal(state.fixtures[1].levels.intensity, 23); assert.equal(state.master, 31);
+});
+
+test('invalid scene selections and edits fail atomically; existing scenes can be edited at the limit', async () => {
+  const state = defaultState(), c = new Controller(state, {});
+  await c.command({ type: 'recallScene', id: 'blue' });
+  const before = structuredClone(state), fade = c.fade;
+  for (const type of ['saveScene', 'updateScene']) {
+    for (const fixtureIds of [null, [], 'wash-1', [12], ['missing'], ['wash-1', 'wash-1'], ['wash-1', 'missing']]) {
+      await assert.rejects(c.command({ type, id: 'blue', name: 'Invalid', fade: 0, fixtureIds }), /existing lights/);
+      assert.deepEqual(state, before); assert.equal(c.fade, fade);
+    }
+    await assert.rejects(c.command({ type, id: 'blue', name: '', fade: 0, fixtureIds: ['wash-1'] }), /name/i);
+    await assert.rejects(c.command({ type, id: 'blue', name: 'Invalid', fade: -1, fixtureIds: ['wash-1'] }), /Fade/);
+    assert.deepEqual(state, before); assert.equal(c.fade, fade);
+  }
+  await assert.rejects(c.command({ type: 'updateScene', id: 'missing', name: 'Invalid', fade: 0, fixtureIds: ['wash-1'] }), /Scene not found/);
+  while (state.scenes.length < 32) await c.command({ type: 'saveScene', name: 'Full scene', fade: 0 });
+  await assert.rejects(c.command({ type: 'saveScene', name: 'Extra', fade: 0, fixtureIds: ['wash-1'] }), /Maximum/);
+  await c.command({ type: 'updateScene', id: 'blue', name: 'Blue left', fade: 0, fixtureIds: ['wash-1'] });
+  assert.equal(state.scenes.length, 32); assert.equal(state.scenes.find(s => s.id === 'blue').name, 'Blue left');
 });
 
 test('output configuration validates networking, protocols and numeric ranges', () => {

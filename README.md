@@ -44,7 +44,8 @@ Start in preview mode to try the controls without hardware. Two generic 3-channe
 - Tap **Arrange**, drag lights to match the room, then tap **Done**. Positions save on the controller and appear on every connected browser. Arrow keys also move fixtures while arranging; Shift makes larger steps.
 - The master dimmer scales DMX fixtures and house dimmers explicitly set to follow the desk. RGB-only lights are dimmed by scaling RGB; profiles with a dedicated dimmer use that channel instead, avoiding double dimming.
 - **Blackout** zeros DMX universes and MQTT house dimmers opted into desk control, while preserving your levels. **Restore lights** brings them back. Space toggles blackout when you are not editing a field or dialog.
-- Scenes save fixture levels and master intensity with a configurable 0–100 second fade. They do not change positions, patching, output settings, or blackout. Editing a level interrupts a fade. A scene only affects fixture IDs it captured; newly added fixtures keep their current levels.
+- Scenes save colors and intensities with a configurable 0–100 second fade. In **Save scene**, use **Scene affects → Choose lights** and check the lights to include, or use **Use stage selection**. These scenes leave other lights and the master unchanged. **All lights + master** captures every current light and the master intensity. Scenes do not change positions, patching, output settings, or blackout. Editing a level interrupts a fade; newly added fixtures keep their own levels when recalling an older scene.
+- To change an existing scene, tap **Edit** in Your scenes, then tap its card. Change its name, fade, or included lights and tap **Save changes**. Retained lights keep their saved colors and intensities; newly included lights use their current levels. Tap **Done** to return to recalling scenes.
 - Browser tabs stay synchronized. If the browser loses its connection, the server continues sending its last levels. The UI disables controls until it reconnects.
 
 Fixture patch, positions, profiles, scenes, and levels are stored in `data/state.json`. Writes are coalesced to at most once a second and the file is replaced atomically. Back up this file to preserve your setup. A corrupt or incompatible file stops startup with an explanatory error rather than silently replacing your patch.
@@ -124,6 +125,8 @@ Start the packaged `olad` service, or run `olad` under the user that owns your O
 
 The OLA URL is resolved from the controller, not the iPad. The app sends form-encoded `POST /set_dmx` requests with `u` and 512 comma-separated `d` values, following OLA's [Web API](https://www.openlighting.org/ola/apis/). Only an `ok` response is accepted. Slow transports drop intermediate frames rather than building a stale queue. A successful request means OLA accepted DMX; verify the physical output patch in OLA.
 
+Once connected, an OLA adapter automatically retries failed requests after two seconds until OLA accepts DMX again. Recovery sends the current levels and respects the current blackout state; it does not engage a new stage blackout. The output status shows when retries are active. **Disconnect**, saving output settings, removing the adapter, or stopping the controller cancels retries. Initial connections still require **Save & connect**, including after a controller restart.
+
 ## House lights: Zigbee2MQTT / Mosquitto
 
 The controller can share your existing Mosquitto broker with Home Assistant. Devices stay paired to Zigbee2MQTT; no new Zigbee radio or re-pairing is required. This uses Zigbee2MQTT’s [device/group commands and state topics](https://www.zigbee2mqtt.io/guide/usage/mqtt_topics_and_messages.html), alongside its existing [Home Assistant integration](https://www.zigbee2mqtt.io/guide/usage/integrations/home_assistant.html).
@@ -136,7 +139,7 @@ Configuration is optional until you are ready:
 4. In **Fixture patch**, add a fixture, choose the MQTT adapter, and enter the exact Zigbee2MQTT friendly name or group name. Discovered dimmers offer name suggestions and maximum brightness. A MQTT dimmer uses no DMX address or universe.
 5. Check **Maximum brightness** against the device’s Zigbee2MQTT Exposes data. The default is 254; device scales from 1–255 are supported. Names containing folders such as `house/front` are supported. Multi-endpoint brightness properties such as `brightness_l1` are outside this initial dimmer integration.
 
-House dimmers appear on the same draggable stage layout, with an intensity slider and reported brightness. Turning intensity to zero sends `{"state":"OFF"}`; other levels send `{"state":"ON","brightness":N}`. New scenes capture their intensity alongside DMX fixtures.
+House dimmers appear on the same draggable stage layout, with an intensity slider and reported brightness. Turning intensity to zero sends `{"state":"OFF"}`; other levels send `{"state":"ON","brightness":N}`. Scenes can include house dimmers alongside DMX fixtures, or target either group on its own.
 
 By default, house dimmers are **independent** of stage master and blackout. Select **Follow stage master and blackout** per fixture to opt in. Connecting, disconnecting, a server restart, and re-establishing a broker connection do not publish stored brightness values. Disconnecting leaves house lights at their current level. Changes made while the broker, bridge, or a known device is offline are not replayed on reconnect; use the dimmer again or recall a scene when it is online.
 
@@ -145,6 +148,16 @@ MQTT publishes changes at up to five commands per second per device, capped at t
 Reported state updates let the app follow changes made by Home Assistant or wall controls, without echoing commands. Reports during a scene fade or within 1.5 seconds of our own command update the reported value but do not move the fader, avoiding transition jitter. Availability shows when Zigbee2MQTT publishes it; otherwise device availability remains unknown. Feedback is what Zigbee2MQTT reports, not an independent measurement of the lamp.
 
 The broker password is saved only in the server’s settings file (mode `0600`) and omitted from browser state updates. An empty password field keeps the saved value; **Clear saved password** removes it. Use the controller on the trusted network described below. The MQTT connection supports normal `mqtt://` and certificate-verified `mqtts://`; no Zigbee device or real installation has been exercised yet. Integration tests use a local MQTT broker.
+
+### Saved scene buttons in Home Assistant
+
+Connecting an MQTT adapter automatically exposes every saved scene as a [Home Assistant MQTT button](https://www.home-assistant.io/integrations/button.mqtt/). Home Assistant must use the same broker with MQTT discovery enabled at its default `homeassistant` prefix. Open **Settings → Devices & services → MQTT → DMX Control** to find the buttons and add them to a dashboard. No YAML or separate Home Assistant credentials are needed.
+
+Pressing a button recalls the scene exactly as tapping its card in this app: saved fades and selected lights are preserved, and blackout stays unchanged. Scenes can include any mix of DMX and house lights; their output adapters must be connected to send physical changes. Scene additions, renames, and deletions update automatically, including changes made while disconnected. Button identities stay stable across renames and restarts.
+
+Buttons become unavailable when their MQTT connection goes offline. Reconnecting or restarting Home Assistant refreshes discovery without recalling a scene. After a controller restart, connect the MQTT adapter again, just as for house-light control. Multiple MQTT adapters using the same broker URL share one set of buttons and each press is handled once.
+
+For brokers with topic ACLs, the controller also needs read/write access to `homeassistant/button/dmxcontrol_CONTROLLER_ID/+/config`, read access to `homeassistant/status`, read access to `dmxcontrol/CONTROLLER_ID/scene/recall`, and write access to `dmxcontrol/CONTROLLER_ID/+/availability`. `CONTROLLER_ID` is the persisted `cid` in the settings file. Home Assistant needs the inverse command/availability permissions plus discovery access. Discovery and availability messages are retained; button commands are not, and retained presses received on reconnect are ignored.
 
 ## Raspberry Pi deployment
 

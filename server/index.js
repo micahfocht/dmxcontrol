@@ -21,7 +21,7 @@ try {
   percent(state.master);
   if (typeof state.blackout !== 'boolean' || !Array.isArray(state.profiles) || state.profiles.length > 64 || !Array.isArray(state.scenes) || state.scenes.length > 32) throw new Error('Invalid saved state.');
   for (const p of state.profiles) { name(p.name); p.channels = validateChannels(p.channels); }
-  for (const s of state.scenes) { name(s.name); percent(s.fade); percent(s.master); for (const levels of Object.values(s.fixtures)) validateLevels(levels); }
+  for (const s of state.scenes) { name(s.name); percent(s.fade); if (s.master !== null) percent(s.master); for (const levels of Object.values(s.fixtures)) validateLevels(levels); }
 } catch (e) {
   if (e.code !== 'ENOENT') throw new Error(`Could not load ${statePath}: ${e.message}. Restore the file from a backup or move it aside to start fresh.`);
   state = defaultState();
@@ -29,7 +29,7 @@ try {
 // Output connections are never restored automatically after a restart.
 state.activeScene = null;
 let dirty = true, persistTimer, persistenceError = null, writeQueue = Promise.resolve();
-const output = new Adapters(state, () => { dirty = true; }, () => controller.changed(), () => !!controller.fade);
+const output = new Adapters(state, () => { dirty = true; }, () => controller.changed(), () => !!controller.fade, message => enqueueCommand(message));
 const controller = new Controller(state, output, () => {
   dirty = true;
   if (!persistTimer) persistTimer = setTimeout(() => { persistTimer = null; persist(); }, 1000);
@@ -81,28 +81,31 @@ function broadcast() {
   const message = JSON.stringify(view());
   for (const ws of wss.clients) if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount < 256 * 1024) ws.send(message);
 }
-// Serialize transport changes across every connected browser.
+// Serialize browser and Home Assistant commands through the same controller.
 let commands = Promise.resolve();
+function enqueueCommand(message) {
+  const command = commands.then(() => controller.command(message));
+  commands = command.catch(() => {});
+  return command;
+}
 wss.on('connection', ws => {
   ws.alive = true;
   ws.on('pong', () => { ws.alive = true; });
   ws.send(JSON.stringify(view()));
   ws.on('error', () => {});
-  ws.on('message', data => {
-    commands = commands.then(async () => {
-      let message;
-      try {
-        message = JSON.parse(data.toString());
-        if (!message || typeof message !== 'object') throw new Error('Invalid command.');
-        await controller.command(message);
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(view()));
-          ws.send(JSON.stringify({ type: 'ack', requestId: message.requestId }));
-        }
-      } catch (e) {
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'error', requestId: message?.requestId, message: e.message }));
+  ws.on('message', async data => {
+    let message;
+    try {
+      message = JSON.parse(data.toString());
+      if (!message || typeof message !== 'object') throw new Error('Invalid command.');
+      await enqueueCommand(message);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(view()));
+        ws.send(JSON.stringify({ type: 'ack', requestId: message.requestId }));
       }
-    });
+    } catch (e) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'error', requestId: message?.requestId, message: e.message }));
+    }
   });
 });
 let lastBroadcast = 0;

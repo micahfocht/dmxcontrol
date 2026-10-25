@@ -57,10 +57,23 @@ export class Controller {
         if ([...BUILTIN_PROFILES, ...s.profiles].some(p => p.name.toLowerCase() === profile.name.toLowerCase())) throw new Error('A profile with this name already exists.');
         s.profiles.push(profile); break;
       }
-      case 'saveScene': {
-        if (s.scenes.length >= 32) throw new Error('Maximum 32 scenes.');
-        const scene = { id: randomUUID(), name: name(message.name, 'Scene name'), fade: percent(message.fade, 'Fade duration'), master: s.master, fixtures: Object.fromEntries(s.fixtures.map(f => [f.id, { ...f.levels }])) };
-        s.scenes.push(scene); s.activeScene = scene.id; break;
+      case 'saveScene':
+      case 'updateScene': {
+        const existing = message.type === 'updateScene' ? s.scenes.find(scene => scene.id === message.id) : null;
+        if (message.type === 'updateScene' && !existing) throw new Error('Scene not found.');
+        if (!existing && s.scenes.length >= 32) throw new Error('Maximum 32 scenes.');
+        const ids = message.fixtureIds;
+        if (ids !== undefined && (!Array.isArray(ids) || !ids.length || ids.length > 32 || new Set(ids).size !== ids.length || ids.some(id => typeof id !== 'string' || !s.fixtures.some(f => f.id === id)))) throw new Error('Choose one or more existing lights, without duplicates.');
+        const fixtures = ids === undefined ? s.fixtures : s.fixtures.filter(f => ids.includes(f.id));
+        const scene = { id: existing?.id ?? randomUUID(), name: name(message.name, 'Scene name'), fade: percent(message.fade, 'Fade duration'),
+          // A selection never changes the shared master, which would affect other lights.
+          master: ids === undefined ? existing?.master ?? s.master : null,
+          fixtures: Object.fromEntries(fixtures.map(f => [f.id, { ...(existing && Object.hasOwn(existing.fixtures, f.id) ? existing.fixtures[f.id] : f.levels) }])) };
+        if (existing) {
+          s.scenes[s.scenes.indexOf(existing)] = scene;
+          if (s.activeScene === scene.id) this.cancelFade();
+        } else { s.scenes.push(scene); s.activeScene = scene.id; }
+        break;
       }
       case 'deleteScene':
         s.scenes = s.scenes.filter(scene => scene.id !== message.id);
@@ -112,7 +125,7 @@ export class Controller {
     if (!this.fade) return false;
     const { start, duration, master, from, target } = this.fade;
     const t = duration ? Math.min(1, Math.max(0, (now - start) / duration)) : 1;
-    this.state.master = master + (target.master - master) * t;
+    if (target.master !== null) this.state.master = master + (target.master - master) * t;
     for (const f of this.state.fixtures) {
       if (!target.fixtures[f.id]) continue;
       for (const k of Object.keys(f.levels)) f.levels[k] = from[f.id][k] + (target.fixtures[f.id][k] - from[f.id][k]) * t;

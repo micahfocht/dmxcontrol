@@ -59,6 +59,9 @@ test('server synchronizes clients, persists layouts/profiles/scenes across resta
   await a.command({ type: 'position', id: 'wash-1', x: 17, y: 68 });
   await a.command({ type: 'profile', name: 'Custom BGR', channels: ['blue', 'green', 'red'].map(kind => ({ kind, label: kind, value: 0 })) });
   await a.command({ type: 'saveScene', name: 'Saved in test', fade: 2 });
+  await a.command({ type: 'saveScene', name: 'Selected scene', fade: 1, fixtureIds: ['wash-1'] });
+  const scopedSceneId = a.states.at(-1).scenes.at(-1).id;
+  await a.command({ type: 'updateScene', id: scopedSceneId, name: 'Left wash only', fade: 0, fixtureIds: ['wash-1'] });
   await a.command({ type: 'master', value: 43 });
   await a.command({ type: 'output', adapterId: 'main', name: 'Art-Net node', config: { ...a.states.at(-1).adapters[0].config, mode: 'artnet', artnetUniverse: 32767, destination: '127.0.0.2' } });
   await a.command({ type: 'addAdapter', name: 'House broker', config: { ...a.states.at(-1).adapters[0].config, mode: 'mqtt', mqttPassword: 'server-test-secret' } });
@@ -77,7 +80,9 @@ test('server synchronizes clients, persists layouts/profiles/scenes across resta
   assert.equal(saved.adapters[1].config.mqttPassword, 'server-test-secret');
   assert.equal((await stat(path.join(dir, 'state.json'))).mode & 0o777, 0o600);
   assert.equal(saved.master, 43); assert.equal(saved.fixtures[0].y, 68);
-  assert.equal(saved.profiles[0].name, 'Custom BGR'); assert.equal(saved.scenes.at(-1).name, 'Saved in test');
+  assert.equal(saved.profiles[0].name, 'Custom BGR'); assert.equal(saved.scenes.at(-2).name, 'Saved in test');
+  assert.equal(saved.scenes.at(-1).name, 'Left wash only'); assert.equal(saved.scenes.at(-1).master, null);
+  assert.deepEqual(Object.keys(saved.scenes.at(-1).fixtures), ['wash-1']);
   url = await start(); const c = await client(url); t.after(() => c.ws.terminate());
   assert.equal(c.states[0].master, 43); assert.equal(c.states[0].fixtures[0].x, 17);
   assert.equal(c.states[0].status.connected, false); assert.equal(c.states[0].library.at(-1).name, 'Custom BGR');
@@ -85,5 +90,11 @@ test('server synchronizes clients, persists layouts/profiles/scenes across resta
   assert.equal(c.states[0].adapters[1].config.mqttPasswordSet, true);
   assert.equal(JSON.stringify(c.states[0]).includes('server-test-secret'), false);
   assert.equal(c.states[0].fixtures.at(-1).mqttDevice, 'house_lights');
+  const excluded = structuredClone(c.states[0].fixtures.filter(f => f.id !== 'wash-1'));
+  await c.command({ type: 'levels', ids: ['wash-1'], levels: { intensity: 1 } });
+  await c.command({ type: 'recallScene', id: scopedSceneId });
+  assert.equal(c.states.at(-1).fixtures[0].levels.intensity, saved.scenes.at(-1).fixtures['wash-1'].intensity);
+  assert.equal(c.states.at(-1).master, 43);
+  assert.deepEqual(c.states.at(-1).fixtures.filter(f => f.id !== 'wash-1'), excluded);
   c.ws.close(); child.kill('SIGTERM'); await once(child, 'exit');
 });

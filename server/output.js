@@ -35,6 +35,7 @@ export class Output {
     this.sequence = 0;
     this.config = null;
     this.pending = null;
+    this.retryAt = null;
   }
   report(patch) {
     Object.assign(this.status, patch);
@@ -89,15 +90,27 @@ export class Output {
     return new Promise((resolve, reject) => this.socket.send(packet, 5568, this.config.destination || multicastAddress(this.config.universe), e => e ? reject(e) : resolve()));
   }
   send(slots) {
-    // Never queue stale frames behind a slow transport.
-    if (!this.status.connected || this.pending) return;
+    // The regular output tick retries OLA with current levels, never queued frames.
+    if ((!this.status.connected && this.retryAt === null) || this.pending || (this.retryAt !== null && Date.now() < this.retryAt)) return;
     this.pending = (this.config.mode === 'usb' ? this.olaSend(slots) : this.sendUdp(slots))
-      .then(() => { this.status.frames++; })
-      .catch(e => this.report({ connected: false, error: e.message }))
+      .then(() => {
+        if (!this.status.connected && this.retryAt === null) return; // Disconnected while sending.
+        this.status.frames++;
+        this.retryAt = null;
+        if (!this.status.connected) this.report({ connected: true, connecting: false, error: null });
+      })
+      .catch(e => {
+        if (!this.status.connected && this.retryAt === null) return;
+        const retry = this.config.mode === 'usb';
+        if (retry) this.retryAt = Date.now() + 2000;
+        this.report({ connected: false, connecting: retry, error: retry ? `Cannot send to OLA. Retrying automatically every 2 seconds. ${e.message}` : e.message });
+      })
       .finally(() => { this.pending = null; });
   }
   async disconnect() {
-    const wasConnected = this.status.connected;
+    // An in-flight retry may have reached OLA, so follow it with a final blackout.
+    const wasConnected = this.status.connected || (this.retryAt !== null && !!this.pending);
+    this.retryAt = null;
     this.report({ connected: false, connecting: false });
     await this.pending;
     let failure;

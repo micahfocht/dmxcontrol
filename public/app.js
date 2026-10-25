@@ -14,6 +14,7 @@ const followsDesk = f => !isMqtt(f) || f.followDesk === true;
 const colors = [['Warm', '#ff7d38'], ['White', '#ffffff'], ['Red', '#ff465c'], ['Violet', '#a26dff'], ['Blue', '#4d85ff'], ['Mint', '#63dbaa']];
 let state, ws, online = false, selected = new Set(), arranging = false, editingScenes = false, drag = null, outputId = 'main';
 let stageSignature = '', inspectorSignature = '', sceneSignature = '', patchDraft = [], profileDraft = [], profileTarget = null;
+let sceneEditId = null;
 let toastTimer, reconnectTimer, lastReceived = 0;
 const pending = new Map(), touching = new Set(), throttleTimers = new Map(), throttleValues = new Map();
 
@@ -260,10 +261,11 @@ function renderScenes() {
     sceneSignature = signature;
     $('#scenes').innerHTML = state.scenes.map(scene => {
       const levels = Object.values(scene.fixtures), a = levels.length ? rgb(levels[0]) : '#aaa', b = levels.length > 1 ? rgb(levels[1]) : a;
-      return `<div class="scene-wrap" data-id="${esc(scene.id)}"><button class="scene" style="--scene-a:${a};--scene-b:${b}" aria-label="Recall ${esc(scene.name)}" aria-pressed="false"><div class="scene-art"><span class="scene-play">▶</span></div><div class="scene-info"><strong>${esc(scene.name)}</strong><small>${scene.fade ? `${scene.fade}s fade` : 'Instant'} · ${Math.round(scene.master)}%</small></div></button>${editingScenes ? `<button class="scene-delete" aria-label="Delete ${esc(scene.name)}">${icon('trash')}</button>` : ''}</div>`;
+      const scope = scene.master === null ? `${levels.length} light${levels.length === 1 ? '' : 's'}` : `${Math.round(scene.master)}% master`;
+      return `<div class="scene-wrap" data-id="${esc(scene.id)}"><button class="scene" style="--scene-a:${a};--scene-b:${b}" aria-label="${editingScenes ? 'Edit' : 'Recall'} ${esc(scene.name)}" aria-pressed="false"><div class="scene-art"><span class="scene-play">${editingScenes ? '✎' : '▶'}</span></div><div class="scene-info"><strong>${esc(scene.name)}</strong><small>${scene.fade ? `${scene.fade}s fade` : 'Instant'} · ${scope}</small></div></button>${editingScenes ? `<button class="scene-delete" aria-label="Delete ${esc(scene.name)}">${icon('trash')}</button>` : ''}</div>`;
     }).join('') || '<p>No scenes yet. Save your first look.</p>';
     $$('.scene-wrap').forEach(wrap => {
-      $('.scene', wrap).addEventListener('click', () => act({ type: 'recallScene', id: wrap.dataset.id }));
+      $('.scene', wrap).addEventListener('click', () => editingScenes ? openScene(state.scenes.find(scene => scene.id === wrap.dataset.id)) : act({ type: 'recallScene', id: wrap.dataset.id }));
       $('.scene-delete', wrap)?.addEventListener('click', () => act({ type: 'deleteScene', id: wrap.dataset.id }));
     });
   }
@@ -272,7 +274,7 @@ function renderScenes() {
     if ($('.scene-delete', wrap)) $('.scene-delete', wrap).disabled = !online;
   });
   const scene = state.scenes.find(scene => scene.id === state.activeScene);
-  $('#scene-status').textContent = scene ? `${state.fading ? 'Fading to' : 'Current scene:'} ${scene.name}${state.blackout ? ' · blackout on' : ''}` : 'Pick a scene. Find your atmosphere.';
+  $('#scene-status').textContent = editingScenes ? 'Tap a scene to edit its settings and lights.' : scene ? `${state.fading ? 'Fading to' : 'Current scene:'} ${scene.name}${state.blackout ? ' · blackout on' : ''}` : 'Pick a scene. Find your atmosphere.';
   $('#manage-scenes').setAttribute('aria-pressed', String(editingScenes)); $('#manage-scenes').textContent = editingScenes ? 'Done' : 'Edit';
 }
 
@@ -317,7 +319,7 @@ function updateOutputStatus() {
   const adapter = state.adapters.find(a => a.id === outputId), status = state.adapterStatuses[outputId];
   if (!adapter || !status) return;
   $('#output-state').textContent = status.error || (status.connected ? adapter.config.mode === 'mqtt' ? `MQTT connected · ${status.frames} commands sent · ${status.devices?.length ?? 0} dimmers discovered` : `${status.frames} frames sent · ${adapter.config.mode === 'usb' ? 'OLA accepted DMX; check USB patch in OLA' : 'UDP sent; receiver response is not available'}` : 'This adapter is disconnected.');
-  $('#disconnect-output').hidden = !status.connected;
+  $('#disconnect-output').hidden = !status.connected && !status.connecting;
   const assigned = state.fixtures.filter(f => f.adapterId === outputId).length;
   $('#adapter-assignment').textContent = `${assigned} fixture${assigned !== 1 ? 's' : ''} assigned${assigned ? ' · reassign in Fixture patch before removing' : ''}`;
   $('#remove-adapter').disabled = !online || !!assigned || state.adapters.length === 1;
@@ -414,7 +416,7 @@ function renderPatch() {
       select.closest('label').hidden = true; select.disabled = true;
       const address = $('[data-field=address]', row); address.closest('label').hidden = true; address.disabled = true;
       const devices = state.adapterStatuses[f.adapterId]?.devices ?? [], listId = `mqtt-devices-${index}`;
-      $('.channel-map', row).innerHTML = `<div class="mqtt-fixture-fields"><div class="form-grid"><label>Device or group name<input data-field="mqttDevice" value="${esc(f.mqttDevice ?? '')}" maxlength="128" required list="${listId}" aria-label="Fixture ${index + 1} MQTT device" placeholder="e.g. house_lights"><datalist id="${listId}">${devices.map(d => `<option value="${esc(d.name)}"></option>`).join('')}</datalist></label><label>Maximum brightness<input data-field="mqttMaxBrightness" type="number" min="1" max="255" value="${f.mqttMaxBrightness ?? 254}" required aria-label="Fixture ${index + 1} maximum brightness"></label></div><label class="checkbox-label"><input type="checkbox" data-field="followDesk" ${f.followDesk ? 'checked' : ''} aria-label="Fixture ${index + 1} follows master and blackout">Follow stage master and blackout</label><p class="field-note">Use the exact Zigbee2MQTT friendly name or group. Default maximum is 254; discovered devices fill this automatically. House dimmers are included when saving new scenes.</p></div>`;
+      $('.channel-map', row).innerHTML = `<div class="mqtt-fixture-fields"><div class="form-grid"><label>Device or group name<input data-field="mqttDevice" value="${esc(f.mqttDevice ?? '')}" maxlength="128" required list="${listId}" aria-label="Fixture ${index + 1} MQTT device" placeholder="e.g. house_lights"><datalist id="${listId}">${devices.map(d => `<option value="${esc(d.name)}"></option>`).join('')}</datalist></label><label>Maximum brightness<input data-field="mqttMaxBrightness" type="number" min="1" max="255" value="${f.mqttMaxBrightness ?? 254}" required aria-label="Fixture ${index + 1} maximum brightness"></label></div><label class="checkbox-label"><input type="checkbox" data-field="followDesk" ${f.followDesk ? 'checked' : ''} aria-label="Fixture ${index + 1} follows master and blackout">Follow stage master and blackout</label><p class="field-note">Use the exact Zigbee2MQTT friendly name or group. Default maximum is 254; discovered devices fill this automatically. House dimmers can be included when saving scenes.</p></div>`;
     }
     $$('input', row).forEach(input => input.addEventListener('input', () => {
       const field = input.dataset.field;
@@ -484,11 +486,36 @@ $('#profile-form').addEventListener('submit', async e => {
     renderPatch(); $('#profile-dialog').close(); toast('Custom profile saved to your library.');
   } catch (e) { $('#profile-error').textContent = e.message; }
 });
-$('#save-scene').addEventListener('click', () => { $('#scene-form').reset(); $('#scene-error').textContent = ''; $('#scene-dialog').showModal(); });
+function updateSceneScope() {
+  const choosing = $('#scene-scope').value === 'selected';
+  $('#scene-fixture-selection').hidden = !choosing;
+  $('#scene-scope-note').textContent = choosing ? 'Only checked lights will change. The master level and other lights stay unchanged.' : 'Includes every current light and the master level.';
+}
+function openScene(scene = null) {
+  const form = $('#scene-form');
+  form.reset(); sceneEditId = scene?.id ?? null;
+  $('#scene-dialog-title').textContent = scene ? 'Edit scene' : 'Save a scene';
+  $('#scene-submit').textContent = scene ? 'Save changes' : 'Save scene';
+  $('#scene-intro').textContent = scene ? 'Keep saved colors and intensities for included lights. Newly included lights use their current levels.' : 'Capture your lights’ colors and intensities. Blackout and positions stay independent.';
+  if (scene) {
+    form.elements.sceneName.value = scene.name; form.elements.fade.value = scene.fade;
+    form.elements.scope.value = scene.master === null ? 'selected' : 'all';
+  }
+  const ids = new Set(scene ? Object.keys(scene.fixtures) : selected);
+  $('#scene-fixtures').innerHTML = state.fixtures.map(f => `<label class="checkbox-label"><input type="checkbox" name="fixtureIds" value="${esc(f.id)}" ${ids.has(f.id) ? 'checked' : ''}><span>${esc(f.name)}<small>${esc(state.adapters.find(a => a.id === f.adapterId)?.name ?? '')}</small></span></label>`).join('') || '<p>No lights are patched yet.</p>';
+  $('#scene-use-selected').disabled = !selected.size;
+  $('#scene-error').textContent = ''; updateSceneScope(); $('#scene-dialog').showModal();
+}
+$('#save-scene').addEventListener('click', () => openScene());
+$('#scene-scope').addEventListener('change', updateSceneScope);
+$('#scene-select-all').addEventListener('click', () => { $$('#scene-fixtures input').forEach(input => { input.checked = true; }); });
+$('#scene-use-selected').addEventListener('click', () => { $$('#scene-fixtures input').forEach(input => { input.checked = selected.has(input.value); }); });
 $('#scene-form').addEventListener('submit', async e => {
   e.preventDefault(); $('#scene-error').textContent = '';
   try {
-    await send({ type: 'saveScene', name: e.target.elements.sceneName.value, fade: Number(e.target.elements.fade.value) });
+    const fixtureIds = e.target.elements.scope.value === 'selected' ? $$('#scene-fixtures input:checked').map(input => input.value) : undefined;
+    if (fixtureIds && !fixtureIds.length) throw new Error('Choose at least one light for this scene.');
+    await send({ type: sceneEditId ? 'updateScene' : 'saveScene', id: sceneEditId, name: e.target.elements.sceneName.value, fade: Number(e.target.elements.fade.value), fixtureIds });
     $('#scene-dialog').close(); toast('Scene saved.');
   } catch (e) { $('#scene-error').textContent = e.message; }
 });
