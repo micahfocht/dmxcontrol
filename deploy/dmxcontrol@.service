@@ -1,0 +1,26 @@
+[Unit]
+Description=DMX Control for %i
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i/dmxcontrol
+Environment=NODE_ENV=production
+Environment=HOST=0.0.0.0
+Environment=PORT=3000
+Environment=DMX_DATA_DIR=/home/%i/.local/share/dmxcontrol
+ExecStart=/usr/bin/node server/index.js
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/%i/.local/share/dmxcontrol
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

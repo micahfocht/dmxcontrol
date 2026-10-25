@@ -1,0 +1,89 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, writeFile, stat, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
+import { WebSocket } from 'ws';
+import { defaultState } from '../server/fixtures.js';
+
+test('server synchronizes clients, persists layouts/profiles/scenes across restart, and rejects foreign origins', { timeout: 15000 }, async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dmx-test-'));
+  const legacy = defaultState(); legacy.version = 1; legacy.output = legacy.adapters[0].config; delete legacy.adapters;
+  delete legacy.output.artnetUniverse;
+  for (const key of ['mqttUrl', 'mqttBaseTopic', 'mqttUsername', 'mqttPassword']) delete legacy.output[key];
+  legacy.fixtures.forEach(f => delete f.adapterId);
+  await writeFile(path.join(dir, 'state.json'), JSON.stringify(legacy));
+  let child;
+  t.after(async () => { if (child && child.exitCode === null) child.kill('SIGKILL'); await rm(dir, { recursive: true, force: true }); });
+  async function start() {
+    child = spawn(process.execPath, ['server/index.js'], { env: { ...process.env, DMX_DATA_DIR: dir, HOST: '127.0.0.1', PORT: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let log = '';
+    child.stderr.on('data', data => { log += data; });
+    const port = await new Promise((resolve, reject) => {
+      child.once('exit', code => reject(new Error(`Server exited ${code}: ${log}`)));
+      child.stdout.on('data', data => { const match = data.toString().match(/127\.0\.0\.1:(\d+)/); if (match) resolve(Number(match[1])); });
+    });
+    return `http://127.0.0.1:${port}`;
+  }
+  async function client(url) {
+    const ws = new WebSocket(url.replace('http', 'ws') + '/ws', { origin: url });
+    const states = []; const acks = new Map();
+    ws.on('message', data => {
+      const message = JSON.parse(data);
+      if (message.type === 'state') states.push(message);
+      else if (message.requestId) acks.set(message.requestId, message);
+    });
+    await once(ws, 'open');
+    while (!states.length) await delay(10);
+    return { ws, states, async command(message) {
+      const requestId = `request-${Math.random()}`;
+      ws.send(JSON.stringify({ ...message, requestId }));
+      while (!acks.has(requestId)) await delay(10);
+      const result = acks.get(requestId);
+      if (result.type === 'error') throw new Error(result.message);
+      return states.at(-1);
+    } };
+  }
+  let url = await start();
+  const a = await client(url), b = await client(url);
+  t.after(() => { a.ws.terminate(); b.ws.terminate(); });
+  assert.equal((await fetch(url + '/api/health')).status, 200);
+  assert.equal((await fetch(url + '/server/index.js')).status, 404);
+  const foreign = new WebSocket(url.replace('http', 'ws') + '/ws', { origin: 'http://evil.example' });
+  foreign.on('error', () => {});
+  const [, response] = await once(foreign, 'unexpected-response');
+  assert.equal(response.statusCode, 403); foreign.terminate();
+  await a.command({ type: 'position', id: 'wash-1', x: 17, y: 68 });
+  await a.command({ type: 'profile', name: 'Custom BGR', channels: ['blue', 'green', 'red'].map(kind => ({ kind, label: kind, value: 0 })) });
+  await a.command({ type: 'saveScene', name: 'Saved in test', fade: 2 });
+  await a.command({ type: 'master', value: 43 });
+  await a.command({ type: 'output', adapterId: 'main', name: 'Art-Net node', config: { ...a.states.at(-1).adapters[0].config, mode: 'artnet', artnetUniverse: 32767, destination: '127.0.0.2' } });
+  await a.command({ type: 'addAdapter', name: 'House broker', config: { ...a.states.at(-1).adapters[0].config, mode: 'mqtt', mqttPassword: 'server-test-secret' } });
+  const mqttId = a.states.at(-1).adapters.at(-1).id;
+  assert.equal(JSON.stringify(a.states.at(-1)).includes('server-test-secret'), false);
+  await a.command({ type: 'patch', fixtures: [...a.states.at(-1).fixtures, { ...a.states.at(-1).fixtures[0], id: 'house-dimmer', adapterId: mqttId, mqttDevice: 'house_lights', mqttMaxBrightness: 254, followDesk: false }] });
+  while (b.states.at(-1).master !== 43) await delay(10);
+  assert.equal(b.states.at(-1).fixtures[0].x, 17);
+  await assert.rejects(a.command({ type: 'master', value: 200 }), /between/);
+  assert.equal(a.states.at(-1).master, 43);
+  a.ws.close(); b.ws.close();
+  child.kill('SIGTERM'); await once(child, 'exit');
+  const saved = JSON.parse(await readFile(path.join(dir, 'state.json'), 'utf8'));
+  assert.equal(saved.version, 2); assert.equal(saved.fixtures[0].adapterId, 'main');
+  assert.equal(saved.adapters[0].config.artnetUniverse, 32767);
+  assert.equal(saved.adapters[1].config.mqttPassword, 'server-test-secret');
+  assert.equal((await stat(path.join(dir, 'state.json'))).mode & 0o777, 0o600);
+  assert.equal(saved.master, 43); assert.equal(saved.fixtures[0].y, 68);
+  assert.equal(saved.profiles[0].name, 'Custom BGR'); assert.equal(saved.scenes.at(-1).name, 'Saved in test');
+  url = await start(); const c = await client(url); t.after(() => c.ws.terminate());
+  assert.equal(c.states[0].master, 43); assert.equal(c.states[0].fixtures[0].x, 17);
+  assert.equal(c.states[0].status.connected, false); assert.equal(c.states[0].library.at(-1).name, 'Custom BGR');
+  assert.equal(c.states[0].adapters[0].config.mode, 'artnet'); assert.equal(c.states[0].adapters[0].config.artnetUniverse, 32767);
+  assert.equal(c.states[0].adapters[1].config.mqttPasswordSet, true);
+  assert.equal(JSON.stringify(c.states[0]).includes('server-test-secret'), false);
+  assert.equal(c.states[0].fixtures.at(-1).mqttDevice, 'house_lights');
+  c.ws.close(); child.kill('SIGTERM'); await once(child, 'exit');
+});
