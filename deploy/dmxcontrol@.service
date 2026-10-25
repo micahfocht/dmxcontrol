@@ -1,17 +1,17 @@
 [Unit]
 Description=DMX Control for %i
 Wants=network-online.target
-After=network-online.target
+After=network-online.target olad.service
 
 [Service]
-Type=simple
-User=%i
-WorkingDirectory=/home/%i/dmxcontrol
+Type=exec
+User=%I
+WorkingDirectory=@PROJECT_DIR@
 Environment=NODE_ENV=production
 Environment=HOST=0.0.0.0
-Environment=PORT=3000
-Environment=DMX_DATA_DIR=/home/%i/.local/share/dmxcontrol
-ExecStart=/usr/bin/node server/index.js
+Environment=PORT=@PORT@
+Environment="DMX_DATA_DIR=@DATA_DIR@"
+ExecStart=:"@NODE@" server/index.js
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=10
@@ -19,7 +19,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/%i/.local/share/dmxcontrol
+ReadWritePaths="@DATA_DIR@"
 UMask=0077
 
 [Install]

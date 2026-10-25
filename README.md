@@ -2,6 +2,29 @@
 
 A small lighting desk for a Raspberry Pi, controlled from an iPad or any modern browser. The Node.js server generates DMX; the browser is the touch interface. No frontend build, cloud service, or internet connection is required once installed.
 
+## Install for testing
+
+On Raspberry Pi OS, Debian, or Ubuntu with systemd, clone the repo as your normal user and run:
+
+```sh
+git clone https://github.com/micahfocht/dmxcontrol.git
+cd dmxcontrol
+./install.sh
+```
+
+The script uses sudo to install prerequisites and a private Node.js runtime, installs the app dependencies, and starts the app now and at every boot. Open `http://<controller-ip>:3000` from another device on the same network. No terminal needs to remain open. Git must already be installed; on a fresh Pi, use `sudo apt update && sudo apt install -y git` first.
+
+For a USB DMX dongle, use `./install.sh --with-ola` instead. This also installs and enables OLA; patch your USB output once in OLA's web interface at `http://<controller-ip>:9090` as described below. Network DMX and preview mode do not need OLA. Lighting outputs start disconnected; connect in the app and restore lights when ready.
+
+To update later:
+
+```sh
+cd dmxcontrol
+./update.sh
+```
+
+Updates fetch `origin/main`, fast-forward your checkout, and rerun setup to install dependencies and restart the app. The repo's branch is **main**, not master. Saved settings and the configured HTTP port are kept. Commit or stash tracked local changes first; the updater refuses other branches, local commits outside `origin/main`, and divergent history. Updating interrupts control briefly and lighting outputs need reconnecting afterward.
+
 ## Run locally
 
 Install Node.js 22 or newer, then:
@@ -125,19 +148,30 @@ The broker password is saved only in the server’s settings file (mode `0600`) 
 
 ## Raspberry Pi deployment
 
-The lightweight server and static frontend are designed for a Pi 3 or 4 with Raspberry Pi OS Lite, preferably 64-bit, and Node.js 22+. The runtime dependencies are `ws` and `mqtt`, with no native Node modules or GUI requirement. OLA is only required for USB. Real Pi performance and the physical lights/dongle still need hardware testing; automated verification runs on Linux x64.
+The lightweight server and static frontend are designed for a Pi 3 or 4 with Raspberry Pi OS Lite, preferably 64-bit, and Node.js 22+. The installer supports Debian-family systems with systemd and `arm64`, `armhf` (ARMv7), or `amd64` userlands. Original Pi 1/Zero ARMv6 systems are unsupported. The runtime dependencies are `ws` and `mqtt`, with no native Node modules or GUI requirement. OLA is only required for USB. Real Pi performance and the physical lights/dongle still need hardware testing; automated verification runs on Linux x64.
 
-Copy this project to `/home/<your-user>/dmxcontrol`, run `npm ci --omit=dev`, and install the included service template. Edit `ExecStart` if Node is not installed at `/usr/bin/node`.
+`./install.sh` can run from any permanent checkout location accessible to your user; keep the checkout in place afterward. It also accepts `--port 3100` if port 3000 is occupied, and remembers the port on subsequent installs and updates. Run it as the user who owns the checkout and has sudo access. Internet access is required for installation and updates, but not normal operation. The script:
+
+- Installs `ca-certificates`, `curl`, `xz-utils`, and the Node runtime libraries `libstdc++6` and `libatomic1` with apt, plus `ola` when `--with-ola` is passed.
+- Downloads the latest Node.js 22 release from nodejs.org and verifies its SHA-256 checksum. Versions live under `/opt/dmxcontrol`, with `/opt/dmxcontrol/current` pointing at the active runtime. Your shell's Node installation is unaffected.
+- Runs `npm ci --omit=dev` as your user. On updates, the service stops before dependencies are replaced.
+- Creates a service for your user from `deploy/dmxcontrol@.service`, with your actual checkout and data paths. The generated instance lives under `/etc/systemd/system`; do not copy the unrendered template there manually.
+- Enables and restarts the service, then waits for a successful `/api/health` response. Errors include a command for reading the service logs.
+
+The service stores settings under `~/.local/share/dmxcontrol`, outside the checkout. On first installation, an existing `data/state.json` is copied there if no deployed state exists; later runs preserve deployed state. Back up `~/.local/share/dmxcontrol/state.json` to preserve your patch, scenes, and credentials. The installer also stores the chosen port in `~/.local/share/dmxcontrol/install-port`.
+
+Manage the service with:
 
 ```sh
-mkdir -p "$HOME/.local/share/dmxcontrol"
-sudo cp deploy/dmxcontrol@.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now "dmxcontrol@$USER"
-journalctl -u "dmxcontrol@$USER" -f
+service=$(systemd-escape --template=dmxcontrol@.service "$(id -un)")
+sudo systemctl status "$service"
+sudo journalctl -u "$service" -f
+sudo systemctl restart "$service"
+# To stop and disable app autostart (keeps the checkout and settings):
+sudo systemctl disable --now "$service"
 ```
 
-The service stores settings under `~/.local/share/dmxcontrol`. To migrate local settings, stop the service and copy `data/state.json` to `~/.local/share/dmxcontrol/state.json`, owned by your user, before starting it again.
+OLA is a separate service: `sudo systemctl status olad.service`. Disabling the app does not disable OLA. The installer does not install Mosquitto or Zigbee2MQTT; house-light adapters use your existing broker and bridge.
 
 Outputs always start disconnected after a restart. Connecting a DMX adapter starts stage blackout so restoring levels is an explicit action. A graceful shutdown attempts to send a final DMX blackout; MQTT house lights are left unchanged. Abrupt power loss or hardware failure cannot guarantee that, and some fixtures/dongles hold their last levels.
 
@@ -151,8 +185,11 @@ Use a trusted local network: this small controller has no login system. It rejec
 
 ## Verification
 
+Install development dependencies before running the suite:
+
 ```sh
+npm ci
 npm test
 ```
 
-Tests cover profile mapping, RGB/dedicated dimmer scaling, blackout, validation, atomic edits, scene interpolation, real loopback UDP packets and termination, OLA requests/errors/backpressure, ArtDmx headers/addressing/sequence rollover, real Art-Net UDP transmission and final blackout, simultaneous isolated Art-Net and sACN universes, adapter assignments and shared-address routing, legacy migration, multi-client synchronization, cross-origin rejection, and persisted state recovery after a process restart. MQTT tests cover broker authentication, credential masking, brightness commands, state feedback without command loops, rate limiting, availability, reconnects without stale commands, and shared scenes. Browser checks cover touch controls, arrangement, custom profiles, patch validation, scene saving, output failures, and responsive tablet/phone layouts. No physical fixture or dongle has been exercised yet.
+Tests cover profile mapping, RGB/dedicated dimmer scaling, blackout, validation, atomic edits, scene interpolation, real loopback UDP packets and termination, OLA requests/errors/backpressure, ArtDmx headers/addressing/sequence rollover, real Art-Net UDP transmission and final blackout, simultaneous isolated Art-Net and sACN universes, adapter assignments and shared-address routing, legacy migration, multi-client synchronization, cross-origin rejection, and persisted state recovery after a process restart. MQTT tests cover broker authentication, credential masking, brightness commands, state feedback without command loops, rate limiting, availability, reconnects without stale commands, and shared scenes. Deployment tests use isolated directories and mocked apt/systemctl/downloads to check installation, checksum rejection, settings preservation, saved ports, OLA enablement, and failure reporting; generated services are checked with systemd's parser when available. Updater tests use real local Git repositories to check fast-forward updates and rejection of local changes or commits. Browser checks cover touch controls, arrangement, custom profiles, patch validation, scene saving, output failures, and responsive tablet/phone layouts. A real Pi installation, reboot, and physical fixture or dongle still need testing.
