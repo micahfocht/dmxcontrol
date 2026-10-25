@@ -26,8 +26,7 @@ try {
   if (e.code !== 'ENOENT') throw new Error(`Could not load ${statePath}: ${e.message}. Restore the file from a backup or move it aside to start fresh.`);
   state = defaultState();
 }
-// Start with saved levels visible. Blackout and interrupted fades are not resumed.
-state.blackout = false;
+// Resume saved levels and blackout; interrupted scene fades are not resumed.
 state.activeScene = null;
 let dirty = true, persistTimer, persistenceError = null, writeQueue = Promise.resolve();
 const output = new Adapters(state, () => { dirty = true; }, () => controller.changed(), () => !!controller.fade, message => enqueueCommand(message));

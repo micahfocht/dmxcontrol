@@ -169,7 +169,7 @@ test('multiple MQTT adapters on one broker expose one set of buttons and handle 
   await until(() => recalls.length === 2); await delay(100); assert.equal(recalls.length, 2);
 });
 
-for (const savedBlackout of [false, true]) test(`server starts with blackout off when saved blackout=${savedBlackout}, auto-connects DMX and MQTT, and accepts HA presses`, { timeout: 20000 }, async t => {
+for (const savedBlackout of [false, true]) test(`server restores saved blackout=${savedBlackout}, auto-connects DMX and MQTT, and accepts HA presses`, { timeout: 20000 }, async t => {
   let mqttReady = true, olaReady = !savedBlackout;
   const b = await broker(t, { authenticate(client, username, password, callback) { callback(null, mqttReady); } });
   const ha = await observer(t, b.url), state = stateFor(b.url), olaRequests = [], dimmerCommands = [];
@@ -213,23 +213,25 @@ for (const savedBlackout of [false, true]) test(`server starts with blackout off
     olaReady = true;
   }
   await until(() => states.at(-1)?.adapterStatuses.main.connected && states.at(-1)?.adapterStatuses.house.connected, 'both saved adapters connect automatically');
-  assert.ok(states.every(s => s.blackout === false), 'blackout is cleared before broadcasting startup state');
+  assert.ok(states.every(s => s.blackout === savedBlackout), 'startup preserves the saved blackout state');
+  assert.equal(states.at(-1).master, state.master);
+  assert.deepEqual(states.at(-1).fixtures[0].levels, state.fixtures[0].levels);
   assert.equal(states.at(-1).activeScene, null);
-  assert.deepEqual(olaRequests[0], renderDmx({ ...state, blackout: false }));
-  assert.ok(olaRequests[0].some(value => value > 0), 'saved DMX levels are visible from the first startup frame');
+  assert.deepEqual(olaRequests[0], renderDmx(state));
+  assert.equal(olaRequests[0].some(value => value > 0), !savedBlackout, 'the first startup frame respects saved blackout');
   assert.equal(dimmerCommands.length, 0, 'startup does not replay saved house brightness');
   const config = [...ha.configs().values()].find(c => c.payload_press === scene.id);
   await ha.client.publishAsync(config.command_topic, config.payload_press);
   await until(() => states.at(-1)?.activeScene === scene.id, 'scene reflected in browser');
   assert.equal(states.at(-1).master, scene.master);
   assert.deepEqual(states.at(-1).fixtures[0].levels, scene.fixtures['wash-1']);
-  assert.equal(states.at(-1).blackout, false);
+  assert.equal(states.at(-1).blackout, savedBlackout);
   await until(() => dimmerCommands.length === 1 && olaRequests.at(-1).equals(renderDmx(states.at(-1))), 'HA scene reaches both physical output transports');
   assert.deepEqual(dimmerCommands[0], { state: 'ON', brightness: 84 });
   const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited;
   assert.equal(child.exitCode, 0, stderr);
   const saved = JSON.parse(await readFile(path.join(dir, 'state.json'), 'utf8'));
   assert.equal(saved.activeScene, scene.id); assert.deepEqual(saved.fixtures[0].levels, scene.fixtures['wash-1']);
-  assert.equal(saved.blackout, false);
+  assert.equal(saved.blackout, savedBlackout);
   await until(() => ha.latest(config.availability_topic) === 'offline');
 });
